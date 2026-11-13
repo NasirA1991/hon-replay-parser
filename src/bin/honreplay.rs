@@ -255,7 +255,7 @@ fn run(cli: Cli) -> R {
             }
             writeln!(
                 w,
-                "{:<4}{:<20}{:<18}{:>4}{:>4}{:>4}{:>6}{:>5}{:>7}{:>7}{:>8}{:>8}{:>4}{:>6}",
+                "{:<4}{:<20}{:<18}{:>4}{:>4}{:>4}{:>5}{:>5}{:>4}{:>8}{:>6}{:>6}{:>8}{:>7}{:>4}{:>4}",
                 "cl",
                 "player",
                 "hero",
@@ -263,32 +263,36 @@ fn run(cli: Cli) -> R {
                 "D",
                 "A",
                 "LH",
+                "NK",
                 "DN",
+                "NW",
                 "GPM",
                 "XPM",
                 "HeroDmg",
                 "BldDmg",
                 "Lv",
-                "Wards"
+                "WS"
             )?;
             for team in ["legion", "hellbourne"] {
                 for p in r.players.iter().filter(|p| p.team == team) {
                     let t = &p.totals;
                     writeln!(
                         w,
-                        "{:<4}{:<20}{:<18}{:>4}{:>4}{:>4}{:>6}{:>5}{:>7.0}{:>7.0}{:>8.0}{:>8.0}{:>4}{:>6}",
+                        "{:<4}{:<20}{:<18}{:>4}{:>4}{:>4}{:>5}{:>5}{:>4}{:>8}{:>6}{:>6}{:>8}{:>7}{:>4}{:>4}",
                         p.client,
                         trunc(&p.name, 19),
                         trunc(&p.hero, 17),
                         t.kills,
                         t.deaths,
                         t.assists,
-                        t.last_hits + t.neutral_kills,
+                        t.last_hits,
+                        t.neutral_kills,
                         t.denies,
-                        t.gpm,
-                        t.xpm,
-                        t.hero_damage,
-                        t.building_damage,
+                        t.net_worth,
+                        t.gpm.round(),
+                        t.xpm.round(),
+                        t.hero_damage.floor(),
+                        t.building_damage.floor(),
                         t.level,
                         t.wards_placed
                     )?;
@@ -317,17 +321,18 @@ fn run(cli: Cli) -> R {
             }
             writeln!(
                 w,
-                "client,name,t_ms,gold,gold_earned,experience,level,kills,deaths,assists,last_hits,denies,hero_damage,damage_received,health,max_health,mana,max_mana"
+                "client,name,t_ms,gold,net_worth,gold_earned,experience,level,kills,deaths,assists,last_hits,denies,hero_damage,damage_received,health,max_health,mana,max_mana"
             )?;
             for p in ps {
                 for s in &p.timeline {
                     writeln!(
                         w,
-                        "{},{},{},{:.0},{},{},{},{},{},{},{},{},{:.0},{:.0},{},{:.0},{},{:.0}",
+                        "{},{},{},{:.0},{},{},{},{},{},{},{},{},{},{:.0},{:.0},{},{:.0},{},{:.0}",
                         p.client,
                         p.name.replace(',', " "),
                         s.t,
                         s.gold,
+                        s.net_worth,
                         s.gold_earned,
                         s.experience,
                         s.level,

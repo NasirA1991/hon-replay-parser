@@ -54,7 +54,8 @@ Times are game time in milliseconds (0 = horn; negative = pre-game).
 | `summary` | match id, map, mode, options, server, version, date, winner, duration, pause time, passive GPM, fps, frames | exact (GameInfo + replayinfo) |
 | `players[].totals` | K/D/A, last hits, neutral kills, denies, gold (current, spent, earned, by source, lost on death), hero and building damage, damage received by type, wards placed and destroyed, camps stacked, kill streak, experience, buybacks | exact |
 | `players[].totals.level` | level from experience (standard 25-level table) | derived |
-| `players[].totals.gpm/xpm` | earned gold and experience per minute of game time | derived |
+| `players[].totals.net_worth` | gold spent + unspent gold (HoN's "net worth") | exact; equals the official value |
+| `players[].totals.gpm/xpm` | net worth and experience per minute of game time (the official definition) | derived |
 | `players[].timeline` | every N seconds (default 10): gold, gold earned, XP, level, K/D/A, LH, DN, hero damage, damage received, HP/MP | exact samples |
 | `players[].positions` | hero x/y every N seconds (default 1) plus alive flag | exact samples |
 | `players[].items` | `purchased` / `acquired` / `moved` / `removed` with time, slot and slot kind | exact entity lifecycle; the purchase/acquire split uses the `GOLD_SPENT` delta |
@@ -84,6 +85,21 @@ Times are game time in milliseconds (0 = horn; negative = pre-game).
   lane, or `jungle` when far from all three. The lane with the most samples wins; under
   40% means `roaming`. On Mid Wars every hero is `mid`.
 * **Level.** `HoN` does not network hero level, so it is computed from experience.
+
+## Verification against official statistics
+
+Match 13436416 (Forests of Caldavar with Phoenix, 62:08, S2R2 v7) was compared with the
+official per-player statistics shown on ward-up.com. These match exactly for all 10 players
+and are locked in by `tests/replays.rs`:
+
+kills, deaths, assists, creep kills, denies, net worth, hero damage, building damage,
+sight wards placed, revelation wards placed (from ward lifecycles), team kill totals
+(62-58), duration, winner, and the bombardier skill build (24 points, order and level
+of every pick).
+
+GPM and XPM match after rounding. Known discrepancy: for one player (No1end, Swiftblade)
+the replay's hero experience reaches the level-25 cap at about 55:00. The official site shows
+level 23 and XPM 467. The other nine players' levels and XPM agree. This is not resolved yet.
 
 ## Not available from replays
 

@@ -148,3 +148,40 @@ fn bit_reader_and_events() {
     assert_eq!(honreplay::events::payload_len(0x8204).0, 11);
     assert_eq!(honreplay::events::payload_len(0x0003_0212).0, 13);
 }
+
+/// Caldavar (Phoenix) 62-minute ranked match, cross-checked against ward-up.com
+/// (which shows the official HoN match statistics).
+#[test]
+fn v7_caldavar_matches_official_stats() {
+    let Some(p) = fixture("13436416.honreplay") else { return };
+    let r = Replay::open(p).unwrap();
+    let rep = analysis::analyze(&r, analysis::Options { include_positions: false, ..Default::default() }).unwrap();
+    assert_eq!(rep.summary.duration_ms, 3_728_800); // 62:08
+    assert_eq!(rep.summary.winner, "hellbourne");
+    // (name, K, D, A, creep kills, denies, net worth, hero damage, building damage, sight wards)
+    let official = [
+        ("Mobutul", 11, 3, 15, 373, 5, 46749, 53422, 1659, 0),
+        ("77777777", 11, 18, 14, 217, 0, 28633, 32246, 3500, 0),
+        ("kobla007", 2, 16, 20, 64, 5, 18251, 17164, 597, 11),
+        ("Victuur", 22, 9, 20, 203, 4, 31758, 69015, 5892, 4),
+        ("ZergoMraz6", 16, 13, 16, 295, 27, 36818, 67993, 1090, 0),
+        ("No1end", 13, 14, 13, 218, 11, 32054, 27108, 9467, 1),
+        ("hi_v1", 14, 9, 25, 174, 1, 34301, 53977, 1559, 0),
+        ("MrEOO", 6, 12, 30, 198, 4, 29373, 37307, 5356, 1),
+        ("evilleader", 10, 17, 21, 191, 3, 27627, 22105, 920, 22),
+        ("Rembo", 15, 10, 26, 275, 13, 38371, 47770, 5535, 1),
+    ];
+    for (name, k, d, a, ck, dn, nw, hd, bd, ws) in official {
+        let p = rep.players.iter().find(|p| p.name == name).unwrap_or_else(|| panic!("{name} missing"));
+        let t = &p.totals;
+        assert_eq!((t.kills, t.deaths, t.assists, t.last_hits, t.denies, t.net_worth), (k, d, a, ck, dn, nw), "{name}");
+        assert_eq!((t.hero_damage.floor() as i64, t.building_damage.floor() as i64, t.wards_placed), (hd, bd, ws), "{name}");
+    }
+    // revelation wards per owner from the ward lifecycle (official WR column)
+    for (name, wr) in [("kobla007", 14), ("evilleader", 18), ("hi_v1", 3), ("MrEOO", 3), ("Rembo", 12), ("Victuur", 0)] {
+        let c = rep.players.iter().find(|p| p.name == name).unwrap().client;
+        assert_eq!(rep.wards.iter().filter(|w| w.owner == Some(c) && w.kind == "revelation").count(), wr, "{name}");
+    }
+    assert_eq!(rep.objectives.iter().filter(|o| o.name == "kongor").count(), 5);
+    assert_eq!(rep.objectives.iter().filter(|o| o.name == "boss_phoenix").count(), 4);
+}

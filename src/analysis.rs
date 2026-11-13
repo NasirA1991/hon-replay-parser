@@ -91,6 +91,8 @@ pub struct Totals {
     pub denies: i64,
     pub gold: f64,
     pub gold_spent: i64,
+    /// Gold spent + unspent gold: HoN's net worth as shown in game and on ward-up.
+    pub net_worth: i64,
     pub gold_earned: i64,
     pub gold_starting: i64,
     pub gold_hero_kills: i64,
@@ -120,6 +122,7 @@ pub struct Sample {
     /// Game time (ms).
     pub t: i64,
     pub gold: f64,
+    pub net_worth: i64,
     pub gold_earned: i64,
     pub experience: i64,
     pub level: u32,
@@ -291,6 +294,7 @@ pub struct TeamReport {
     pub deaths: i64,
     pub tower_kills: i64,
     pub towers_remaining: Option<i64>,
+    pub net_worth: i64,
     pub gold_earned: i64,
     pub experience: i64,
 }
@@ -1071,7 +1075,7 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
                     st.report.timeline.push(Sample {
                         t,
                         gold: tot.gold,
-                        gold_earned: tot.gold_earned,
+                        gold_earned: tot.gold_earned, net_worth: tot.net_worth,
                         experience: tot.experience,
                         level: tot.level,
                         kills: tot.kills,
@@ -1132,7 +1136,7 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
                     } else {
                         0
                     };
-                    g += s * tot.gold_earned;
+                    g += s * tot.net_worth;
                     x += s * tot.experience;
                 }
                 advantage.push(AdvantageSample {
@@ -1236,7 +1240,7 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
     for st in players.values_mut() {
         if let Some(pe) = pool.get(st.player_entity) {
             st.report.totals = totals(&ctx, pe, pool.get(st.report.hero_entity));
-            st.report.totals.gpm = st.report.totals.gold_earned as f64 / minutes;
+            st.report.totals.gpm = st.report.totals.net_worth as f64 / minutes;
             st.report.totals.xpm = st.report.totals.experience as f64 / minutes;
         }
         let end = summary.duration_ms;
@@ -1318,9 +1322,9 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
         let (gd, xd) = match (&me, opp.is_empty()) {
             (Some(m), false) => {
                 let n = opp.len() as i64;
-                let og: i64 = opp.iter().map(|s| s.gold_earned).sum::<i64>() / n;
+                let og: i64 = opp.iter().map(|s| s.net_worth).sum::<i64>() / n;
                 let ox: i64 = opp.iter().map(|s| s.experience).sum::<i64>() / n;
-                (Some(m.gold_earned - og), Some(m.experience - ox))
+                (Some(m.net_worth - og), Some(m.experience - ox))
             }
             _ => (None, None),
         };
@@ -1359,7 +1363,7 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
             deaths: ps.iter().map(|p| p.totals.deaths).sum(),
             tower_kills: tt.0,
             towers_remaining: tt.1,
-            gold_earned: ps.iter().map(|p| p.totals.gold_earned).sum(),
+            gold_earned: ps.iter().map(|p| p.totals.gold_earned).sum(), net_worth: ps.iter().map(|p| p.totals.net_worth).sum(),
             experience: ps.iter().map(|p| p.totals.experience).sum(),
         });
     }
@@ -1416,6 +1420,7 @@ fn totals(ctx: &Ctx, pe: &Entity, he: Option<&Entity>) -> Totals {
     };
     t.gold_earned =
         t.gold_hero_kills + t.gold_assists + t.gold_buildings + t.gold_creeps + t.gold_neutrals;
+    t.net_worth = t.gold_spent + t.gold.floor() as i64;
     t
 }
 
