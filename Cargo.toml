@@ -1,0 +1,30 @@
+[package]
+name = "honreplay"
+version = "0.1.0"
+edition = "2024"
+description = "Complete parser for Heroes of Newerth (.honreplay, S2R2 v6/v7) replays: entity snapshots, game events, chat and match analytics."
+license = "MIT"
+repository = "https://github.com/NasirA1991/hon-replay-parser"
+readme = "README.md"
+keywords = ["heroes-of-newerth", "hon", "replay", "parser", "k2"]
+categories = ["parser-implementations", "games"]
+
+[lib]
+name = "honreplay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "honreplay"
+path = "src/bin/honreplay.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+quick-xml = "0.38"
+zip = { version = "4", default-features = false, features = ["zstd", "deflate"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
