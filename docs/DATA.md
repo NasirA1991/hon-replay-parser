@@ -29,7 +29,7 @@ Counts are entity creations in a 26-minute Mid Wars replay.
 | `TeamInfo` | 4 | teams | tower counts, tower kills, base health, base building, picks/bans fields, team target |
 | `Waypoint`, `Vanity`, `KillScreen`, `Shop_*`, `Entity_*` | | map pings, cosmetics, shop stock, spawners | |
 
-Run `honreplay schema <replay>` to list every field of every type (about 1,200 fields).
+Run `honreplay schema <replay>` to list every field of every type (about 1,160 fields).
 
 ### Player statistics fields (exact, updated live)
 
