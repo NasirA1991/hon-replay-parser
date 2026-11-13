@@ -20,7 +20,8 @@ cl  player              hero                 K   D   A    LH   DN    GPM    XPM 
   and v7 on a 0.13.3.0 server (Mid Wars); every frame of both decodes bit-exactly. Exactly
   which game patch moved from v6 to v7 is not established yet. More sample replays are
   welcome.
-* **Fast:** a 26-minute match (165k frames, 4.7M entity updates) decodes in about 2 s.
+* **Fast:** a 62-minute match (384k frames, 25M entity updates) decodes in about 2.5 s
+  and is fully analysed in about 4 s.
 * **Cross-platform:** Linux, macOS (Apple Silicon and Intel) and Windows. Pure Rust, no
   native dependencies.
 * **Usable two ways:** as a CLI (tables, CSV, JSON or NDJSON) or as a library crate.
@@ -50,6 +51,8 @@ honreplay <command> <replay.honreplay> [options]
 | `skills` | skill build (ability level-ups with timings) |
 | `casts` | every ability and item use, with cooldowns |
 | `kills` | hero kills with killer, assisters and map position |
+| `damage` | who damaged whom: hero damage per attacker and victim, and how it was attributed |
+| `stats` | the server's own end-of-match statistics document embedded in the replay |
 | `wards` | ward placements: type, team, owner, position, lifetime, destroyed or expired |
 | `objectives` | towers and buildings destroyed, Kongor kills, runes, courier deaths |
 | `chat` | all and team chat |
@@ -132,11 +135,12 @@ their v6/v7 differences, game events, packets and the game clock.
 
 ## Limitations
 
-* Hero picks and bans are not recorded (recording starts after the draft).
-* The server sends damage totals, not individual hits, so a "who damaged whom" matrix
-  is not available yet (see DATA.md).
-* Replays older than S2R2 v6 (original HoN, pre-Reborn) should work; v3-v5 headers are
-  supported. They are untested because no sample is available.
+* Bans are not recorded (recording starts after the draft); each player's pick is.
+* APM is not available: the server's action counter is never sent to clients.
+* The who-damaged-whom matrix is exact for hits (about 80% of hero damage) and
+  estimated for part of the damage over time; every cell says how much is which.
+* Verified on S2R2 v7 (server 0.13.3.0). The v6 path and replays older than v6 are
+  covered by tests only when their sample replays are present (see Tests).
 
 ## Tests
 

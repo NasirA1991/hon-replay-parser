@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::entity::{Change, Entity, Pool};
 use crate::error::Result;
 use crate::header::Header;
+use crate::messages::{self, popup_kind};
 use crate::replay::{Frame, Replay};
 use crate::schema::Value;
 
@@ -306,6 +307,79 @@ pub struct AdvantageSample {
     pub experience: i64,
 }
 
+/// One damage popup of a player against an enemy hero (or one of its illusions).
+#[derive(Debug, Clone, Serialize)]
+pub struct HeroHit {
+    pub t: i64,
+    pub attacker: u32,
+    pub victim: u32,
+    /// Damage after mitigation, as counted by the server.
+    pub amount: f32,
+    /// "physical" or "magic".
+    pub damage_type: &'static str,
+    /// The target was an illusion of the victim's hero (not counted as hero damage).
+    pub illusion: bool,
+}
+
+/// Damage one player dealt to one enemy player's hero.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DamageCell {
+    pub attacker: u32,
+    pub victim: u32,
+    /// Sum of per-hit damage popups (exact).
+    pub exact: f64,
+    /// Damage without a popup (damage over time, auras) in frames where only one enemy
+    /// hero took damage, so the pairing is unambiguous.
+    pub matched: f64,
+    /// Damage without a popup in frames where several enemy heroes took damage; split in
+    /// proportion to the damage each of them received in that frame.
+    pub allocated: f64,
+    pub total: f64,
+    pub hits: u32,
+}
+
+/// Where one player's damage went.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DamageSource {
+    pub client: u32,
+    /// The server's `HERO_DAMAGE` counter (what stats sites show).
+    pub hero_damage: f64,
+    /// Sum of this player's matrix row.
+    pub attributed: f64,
+    /// Hero damage that could not be assigned to a victim.
+    pub unattributed: f64,
+    /// Popup damage against other targets (not part of `hero_damage`).
+    pub to_illusions: f64,
+    pub to_creeps: f64,
+    pub to_neutrals: f64,
+    pub to_buildings: f64,
+    pub to_other: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DamageReport {
+    pub matrix: Vec<DamageCell>,
+    pub players: Vec<DamageSource>,
+    pub hits: Vec<HeroHit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DraftEntry {
+    /// Client number for picks, team name for bans.
+    pub by: String,
+    pub hero: String,
+    pub hero_type_id: u16,
+}
+
+/// Hero selection. Recording starts after the draft, so `picks` is the selection each
+/// player ended up with and `bans` is only filled when the server left ban data in
+/// `TeamInfo` (it does not in normal matchmaking replays seen so far).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Draft {
+    pub picks: Vec<DraftEntry>,
+    pub bans: Vec<DraftEntry>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub parser_version: String,
@@ -321,12 +395,34 @@ pub struct Report {
     /// Legion minus Hellbourne.
     pub advantage: Vec<AdvantageSample>,
     pub chat: Vec<ChatLine>,
+    pub damage: DamageReport,
+    pub draft: Draft,
+    /// The server's own end-of-match statistics document, when the replay contains it
+    /// (verbatim; same schema the stats service uses).
+    pub server_stats: Option<serde_json::Value>,
     pub warnings: Vec<String>,
 }
 
+/// FNV-1a: field names are short and looked up millions of times per replay.
+#[derive(Default, Clone, Copy)]
+pub struct Fnv(u64);
+impl std::hash::Hasher for Fnv {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = if self.0 == 0 { 0xcbf29ce484222325 } else { self.0 };
+        for b in bytes {
+            h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+        }
+        self.0 = h;
+    }
+}
+type FnvBuild = std::hash::BuildHasherDefault<Fnv>;
+
 /// Field index lookup by name, per typedesc.
 pub struct FieldIndex {
-    maps: Vec<HashMap<String, usize>>,
+    maps: Vec<HashMap<String, usize, FnvBuild>>,
 }
 impl FieldIndex {
     pub fn new(h: &Header) -> Self {
@@ -401,6 +497,8 @@ pub fn short_name(path: &str) -> String {
 struct Ctx<'a> {
     h: &'a Header,
     fi: FieldIndex,
+    /// Resource path per entity type id.
+    paths: Vec<&'a str>,
 }
 impl Ctx<'_> {
     fn tname(&self, e: &Entity) -> &str {
@@ -416,7 +514,7 @@ impl Ctx<'_> {
         self.f(e, name).and_then(|v| v.as_f64()).unwrap_or(0.0)
     }
     fn path(&self, e: &Entity) -> &str {
-        self.h.resource_path(e.type_id).unwrap_or("")
+        self.paths.get(e.type_id as usize).copied().unwrap_or("")
     }
     fn pos(&self, e: &Entity) -> (i32, i32) {
         if let Some(v) = self.f(e, "m_v3Position.xy").and_then(|v| v.as_xyz()) {
@@ -434,6 +532,44 @@ impl Ctx<'_> {
 
 const NONE32: i64 = 0xFFFF_FFFF;
 
+/// Indices of the Player fields read every frame (all Player entities share a typedesc).
+#[derive(Clone, Copy)]
+struct PlayerFields {
+    spent: usize,
+    kills: usize,
+    deaths: usize,
+    assists: usize,
+    hero_damage: usize,
+    received: [usize; 3],
+}
+impl PlayerFields {
+    fn new(ctx: &Ctx, e: &Entity) -> Option<Self> {
+        let i = |n: &str| ctx.fi.get(e.typedesc, &format!("m_aStatTotals[PLAYER_STAT_{n}]"));
+        let f = |n: &str| ctx.fi.get(e.typedesc, &format!("m_aFloatStatTotals[PLAYER_STAT_{n}]"));
+        Some(PlayerFields {
+            spent: i("GOLD_SPENT")?,
+            kills: i("HERO_KILLS")?,
+            deaths: i("DEATHS")?,
+            assists: i("ASSISTS")?,
+            hero_damage: f("HERO_DAMAGE")?,
+            received: [
+                f("MAGIC_DAMAGE_RECEIVED")?,
+                f("PHYSICAL_DAMAGE_RECEIVED")?,
+                f("PURE_DAMAGE_RECEIVED")?,
+            ],
+        })
+    }
+}
+fn iv(e: &Entity, idx: usize) -> i64 {
+    e.fields[idx].as_i64().unwrap_or(0)
+}
+fn fv(e: &Entity, idx: usize) -> f64 {
+    e.fields[idx].as_f64().unwrap_or(0.0)
+}
+
+/// Smallest stat change treated as damage (the counters are f32).
+const DAMAGE_EPS: f64 = 0.0005;
+
 struct PlayerState {
     report: PlayerReport,
     player_entity: u32,
@@ -447,15 +583,26 @@ struct PlayerState {
     cooldowns: HashMap<u32, i64>,
     last_spent: i64,
     spent_delta: i64,
+    last_hero_damage: f64,
+    last_received: f64,
+    damage: DamageSource,
+    seen_team: Option<i64>,
+    seen_name: Option<(i64, u64)>,
+    seen_hero: Option<(u32, u16, Option<u32>)>,
     lane_counts: HashMap<&'static str, u32>,
     next_lane: i64,
 }
 
 pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
     let h = &replay.header;
+    let mut paths = vec![""; h.entity_resources.keys().next_back().map_or(0, |t| *t as usize + 1)];
+    for t in h.entity_resources.keys() {
+        paths[*t as usize] = h.resource_path(*t).unwrap_or("");
+    }
     let ctx = Ctx {
         h,
         fi: FieldIndex::new(h),
+        paths,
     };
     let info = &replay.info;
     let mut summary = MatchSummary {
@@ -511,6 +658,15 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
     let mut frames = replay.frames();
     let mut nframes = 0u64;
     let mut prev_pool_snapshot: HashMap<u32, Entity> = HashMap::new();
+    let mut prev_health: HashMap<u32, i64> = HashMap::new();
+    let mut strings_generation = 0u64;
+    let mut player_fields: Option<PlayerFields> = None;
+    let mut stats_asm = messages::StatsAssembler::default();
+    let mut server_stats: Option<serde_json::Value> = None;
+    let mut damage_cells: HashMap<(u32, u32), DamageCell> = HashMap::new();
+    let mut hero_hits: Vec<HeroHit> = Vec::new();
+    let mut popups: Vec<messages::Popup> = Vec::new();
+    let mut bans: BTreeMap<(String, u16), ()> = BTreeMap::new();
 
     while let Some(frame) = frames.next_frame() {
         let frame: Frame = match frame {
@@ -526,6 +682,9 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
         }
         summary.last_clock = frame.clock;
         let pool: &Pool = frames.pool();
+        if !frame.string_updates.is_empty() {
+            strings_generation += 1;
+        }
 
         // --- match clock -------------------------------------------------------------
         for ch in &frame.changes {
@@ -637,6 +796,15 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
                         cooldowns: HashMap::new(),
                         last_spent: 0,
                         spent_delta: 0,
+                        last_hero_damage: 0.0,
+                        last_received: 0.0,
+                        damage: DamageSource {
+                            client,
+                            ..Default::default()
+                        },
+                        seen_team: None,
+                        seen_name: None,
+                        seen_hero: None,
                         lane_counts: HashMap::new(),
                         next_lane: 0,
                     });
@@ -649,23 +817,32 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
                 continue;
             };
             let r = &mut st.report;
-            r.team = team_name(ctx.i(pe, "m_uiTeamID"));
+            // Strings are only rebuilt when their source changes; this runs every frame.
+            let team_id = ctx.i(pe, "m_uiTeamID");
+            if st.seen_team != Some(team_id) {
+                st.seen_team = Some(team_id);
+                r.team = team_name(team_id);
+            }
             r.team_slot = ctx.i(pe, "m_iTeamIndex");
             r.role = ctx.i(pe, "m_eRole");
             let hk = ctx.i(pe, "m_uiHeroAvatarKey");
             if hk != NONE32 {
                 r.hero_avatar_key = Some(hk);
             }
-            let nm = frames
-                .string(2, ctx.i(pe, "m_unNameIndex") as u32)
-                .unwrap_or("");
-            if !nm.is_empty() {
-                r.name = nm.to_string();
+            let name_key = (ctx.i(pe, "m_unNameIndex"), strings_generation);
+            if st.seen_name != Some(name_key) {
+                st.seen_name = Some(name_key);
+                let nm = frames.string(2, name_key.0 as u32).unwrap_or("");
+                if !nm.is_empty() {
+                    r.name = nm.to_string();
+                }
             }
             let hero = ctx.i(pe, "m_uiHeroIndex");
             if hero != 0xFFFF && hero != NONE32 {
                 if let Some(he) = pool.get(hero as u32) {
-                    if ctx.tname(he) == "Hero" {
+                    let hero_key = (hero as u32, he.type_id, he.variant);
+                    if st.seen_hero != Some(hero_key) && ctx.tname(he) == "Hero" {
+                        st.seen_hero = Some(hero_key);
                         r.hero_entity = hero as u32;
                         r.hero_type_id = he.type_id;
                         r.hero = short_name(ctx.path(he));
@@ -695,12 +872,16 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
             let Some(pe) = pool.get(st.player_entity) else {
                 continue;
             };
-            let spent = ctx.i(pe, "m_aStatTotals[PLAYER_STAT_GOLD_SPENT]");
+            if player_fields.is_none() {
+                player_fields = PlayerFields::new(&ctx, pe);
+            }
+            let Some(pf) = player_fields else { continue };
+            let spent = iv(pe, pf.spent);
             st.spent_delta = spent - st.last_spent;
             st.last_spent = spent;
-            let k = ctx.i(pe, "m_aStatTotals[PLAYER_STAT_HERO_KILLS]");
-            let d = ctx.i(pe, "m_aStatTotals[PLAYER_STAT_DEATHS]");
-            let a = ctx.i(pe, "m_aStatTotals[PLAYER_STAT_ASSISTS]");
+            let k = iv(pe, pf.kills);
+            let d = iv(pe, pf.deaths);
+            let a = iv(pe, pf.assists);
             if k != st.last_kills || d != st.last_deaths || a != st.last_assists {
                 frame_kill_delta.push((
                     st.report.client,
@@ -763,6 +944,150 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
             });
             if let Some(k) = killer {
                 players.get_mut(&k).unwrap().report.kills.push(*victim);
+            }
+        }
+
+        // --- damage: per-hit popups, then the remainder from the stat counters ---------
+        // Popups of the damage kinds are sent only to the dealing player, so every hit
+        // appears once across the ten client queues.
+        let mut frame_exact: Vec<(u32, u32, f64)> = Vec::new();
+        for p in &frame.packets {
+            if let Some(doc) = stats_asm.feed(p.receiver, &p.data) {
+                server_stats = Some(doc);
+            }
+            if p.queue != 1 {
+                continue;
+            }
+            popups.clear();
+            messages::scan_popups(&p.data, frame.clock, &mut popups);
+            for pp in &popups {
+                let (Some(pl), Some(val)) = (pp.player, pp.value) else {
+                    continue;
+                };
+                let damage_type = match pp.kind {
+                    popup_kind::DAMAGE_PHYSICAL => "physical",
+                    popup_kind::DAMAGE_MAGIC => "magic",
+                    _ => continue,
+                };
+                let attacker = pl as u32 + 1;
+                if p.receiver != pl as u32 || !players.contains_key(&attacker) {
+                    continue;
+                }
+                let val64 = val as f64;
+                let ateam = players[&attacker].report.team.clone();
+                let target = pool.get(pp.entity as u32);
+                let mut hit: Option<(u32, bool)> = None;
+                let bucket: &str = match target.map(|e| (e, ctx.tname(e))) {
+                    Some((_, "Hero")) if hero_owner.contains_key(&(pp.entity as u32)) => {
+                        let victim = hero_owner[&(pp.entity as u32)];
+                        if victim != attacker && players[&victim].report.team != ateam {
+                            hit = Some((victim, false));
+                            "hero"
+                        } else {
+                            "other"
+                        }
+                    }
+                    Some((e, "Hero")) => {
+                        let owner = ctx.i(e, "m_iOwnerClientNumber") as u32;
+                        if team_name(ctx.i(e, "m_uiTeamID")) != ateam
+                            && players.contains_key(&owner)
+                        {
+                            hit = Some((owner, true));
+                            "illusion"
+                        } else {
+                            "other"
+                        }
+                    }
+                    Some((_, "Creep")) => "creep",
+                    Some((_, "Neutral")) => "neutral",
+                    Some((_, "Building")) => "building",
+                    _ => "other",
+                };
+                let src = &mut players.get_mut(&attacker).unwrap().damage;
+                match bucket {
+                    "hero" => {}
+                    "illusion" => src.to_illusions += val64,
+                    "creep" => src.to_creeps += val64,
+                    "neutral" => src.to_neutrals += val64,
+                    "building" => src.to_buildings += val64,
+                    _ => src.to_other += val64,
+                }
+                if let Some((victim, illusion)) = hit {
+                    hero_hits.push(HeroHit {
+                        t,
+                        attacker,
+                        victim,
+                        amount: val,
+                        damage_type,
+                        illusion,
+                    });
+                    if !illusion {
+                        frame_exact.push((attacker, victim, val64));
+                        let c = damage_cells.entry((attacker, victim)).or_default();
+                        c.exact += val64;
+                        c.hits += 1;
+                    }
+                }
+            }
+        }
+        if let Some(pf) = player_fields {
+            let mut dealt: Vec<(u32, f64)> = Vec::new();
+            let mut received: Vec<(u32, f64)> = Vec::new();
+            for st in players.values_mut() {
+                let Some(pe) = pool.get(st.player_entity) else {
+                    continue;
+                };
+                let d = fv(pe, pf.hero_damage);
+                let r = fv(pe, pf.received[0]) + fv(pe, pf.received[1]) + fv(pe, pf.received[2]);
+                if d - st.last_hero_damage > DAMAGE_EPS {
+                    dealt.push((st.report.client, d - st.last_hero_damage));
+                }
+                if r - st.last_received > DAMAGE_EPS {
+                    received.push((st.report.client, r - st.last_received));
+                }
+                st.last_hero_damage = d;
+                st.last_received = r;
+            }
+            // what each victim received beyond the popups already attributed to it
+            for (victim, amount) in received.iter_mut() {
+                let seen: f64 = frame_exact
+                    .iter()
+                    .filter(|x| x.1 == *victim)
+                    .map(|x| x.2)
+                    .sum();
+                *amount = (*amount - seen).max(0.0);
+            }
+            for (attacker, delta) in dealt {
+                let seen: f64 = frame_exact
+                    .iter()
+                    .filter(|x| x.0 == attacker)
+                    .map(|x| x.2)
+                    .sum();
+                let rest = delta - seen;
+                if rest <= DAMAGE_EPS {
+                    continue;
+                }
+                let ateam = &players[&attacker].report.team;
+                let cands: Vec<(u32, f64)> = received
+                    .iter()
+                    .filter(|(v, a)| *a > DAMAGE_EPS && &players[v].report.team != ateam)
+                    .copied()
+                    .collect();
+                match cands.as_slice() {
+                    [] => players.get_mut(&attacker).unwrap().damage.unattributed += rest,
+                    [(victim, _)] => {
+                        damage_cells.entry((attacker, *victim)).or_default().matched += rest
+                    }
+                    many => {
+                        let sum: f64 = many.iter().map(|x| x.1).sum();
+                        for (victim, a) in many {
+                            damage_cells
+                                .entry((attacker, *victim))
+                                .or_default()
+                                .allocated += rest * a / sum;
+                        }
+                    }
+                }
             }
         }
 
@@ -1020,10 +1345,7 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
             if !(tn == "Building" || is_boss || is_courier) {
                 continue;
             }
-            let before = prev_pool_snapshot
-                .get(id)
-                .map(|p| ctx.i(p, "m_fHealth"))
-                .unwrap_or(1);
+            let before = prev_health.get(id).copied().unwrap_or(1);
             let now = ctx.i(e, "m_fHealth");
             if before > 0 && now <= 0 && t >= 0 {
                 let (x, y) = ctx.pos(e);
@@ -1053,12 +1375,20 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
             match ch {
                 Change::Create { id, .. } | Change::Update { id, .. } => {
                     let e = pool.get(*id).unwrap();
-                    if matches!(ctx.tname(e), "Building" | "Neutral" | "Powerup" | "Pet") {
-                        prev_pool_snapshot.insert(*id, e.clone());
+                    // deletions of runes need the entity; unit deaths only the last health
+                    match ctx.tname(e) {
+                        "Powerup" => {
+                            prev_pool_snapshot.insert(*id, e.clone());
+                        }
+                        "Building" | "Neutral" | "Pet" => {
+                            prev_health.insert(*id, ctx.i(e, "m_fHealth"));
+                        }
+                        _ => {}
                     }
                 }
                 Change::Delete { id, .. } => {
                     prev_pool_snapshot.remove(id);
+                    prev_health.remove(id);
                 }
             }
         }
@@ -1161,6 +1491,14 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
                             bases.insert(tn.clone(), (x as f64, y as f64));
                         }
                     }
+                    for (i, f) in h.typedescs[e.typedesc].fields.iter().enumerate() {
+                        if f.name.starts_with("m_vHiddenHeroBans") {
+                            let id = iv(e, i);
+                            if id != 0 && id != 0xFFFF {
+                                bans.insert((tn.clone(), id as u16), ());
+                            }
+                        }
+                    }
                     team_towers.insert(
                         tn,
                         (
@@ -1236,6 +1574,27 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
         );
     }
     let pool = frames.pool();
+    let mut draft = Draft::default();
+    for st in players.values() {
+        let Some(pe) = pool.get(st.player_entity) else {
+            continue;
+        };
+        let id = ctx.i(pe, "m_unSelectedHeroID");
+        if id != 0 && id != 0xFFFF {
+            draft.picks.push(DraftEntry {
+                by: st.report.client.to_string(),
+                hero: short_name(h.resource_path(id as u16).unwrap_or("")),
+                hero_type_id: id as u16,
+            });
+        }
+    }
+    for (team, id) in bans.into_keys() {
+        draft.bans.push(DraftEntry {
+            by: team,
+            hero: short_name(h.resource_path(id).unwrap_or("")),
+            hero_type_id: id,
+        });
+    }
     let minutes = (summary.duration_ms.max(1) as f64) / 60_000.0;
     for st in players.values_mut() {
         if let Some(pe) = pool.get(st.player_entity) {
@@ -1352,6 +1711,28 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
         wards_done.push(w);
     }
     wards_done.sort_by_key(|w| w.placed_t);
+    let mut damage = DamageReport {
+        hits: hero_hits,
+        ..Default::default()
+    };
+    for ((attacker, victim), mut c) in damage_cells {
+        c.attacker = attacker;
+        c.victim = victim;
+        c.total = c.exact + c.matched + c.allocated;
+        damage.matrix.push(c);
+    }
+    damage.matrix.sort_by_key(|c| (c.attacker, c.victim));
+    for st in players.values() {
+        let mut src = st.damage.clone();
+        src.hero_damage = st.report.totals.hero_damage;
+        src.attributed = damage
+            .matrix
+            .iter()
+            .filter(|c| c.attacker == src.client)
+            .map(|c| c.total)
+            .sum();
+        damage.players.push(src);
+    }
     let player_list: Vec<PlayerReport> = players.into_values().map(|s| s.report).collect();
     let mut teams = Vec::new();
     for tn in ["legion", "hellbourne"] {
@@ -1380,6 +1761,9 @@ pub fn analyze(replay: &Replay, opts: Options) -> Result<Report> {
         couriers,
         advantage,
         chat,
+        damage,
+        draft,
+        server_stats,
         warnings,
     })
 }

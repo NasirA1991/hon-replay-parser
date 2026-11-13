@@ -23,6 +23,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 quick-xml = "0.38"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 zip = { version = "4", default-features = false, features = ["zstd", "deflate"] }
 
 [profile.release]

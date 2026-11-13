@@ -133,47 +133,81 @@ pub fn read_field(b: &mut BitReader, f: &FieldDesc) -> Value {
     }
 }
 
-/// Port of the K2 compressed field-mask ("unpack enabled") tree.
-pub fn read_mask(b: &mut BitReader, count: usize, out: &mut Vec<bool>) -> bool {
+/// Read the K2 compressed field mask ("unpack enabled") as the ascending list of set
+/// indices. Returns false when the mask marks an index past `count`, which means the
+/// stream is misaligned.
+///
+/// For more than 8 entries the mask is a binary tree over `2^ceil(log2(count))` leaves,
+/// written level by level: for every set node, `0` = only the left child, `1 0` = only
+/// the right child, `1 1` = both. Only set nodes are visited, so the cost follows the
+/// number of changed fields, not the size of the type.
+pub fn read_mask_set(b: &mut BitReader, count: usize, out: &mut Vec<u16>) -> bool {
     out.clear();
     if count <= 8 {
-        for _ in 0..count {
-            out.push(b.bit());
+        for i in 0..count {
+            if b.bit() {
+                out.push(i as u16);
+            }
         }
         return true;
     }
-    out.resize(count, false);
     if !b.bit() {
         return true;
     }
-    let mut size = 1usize;
-    while size < count {
-        size *= 2;
-    }
-    let mut tree = vec![false; size * 2];
-    tree[1] = true;
-    let mut level = 1usize;
-    while (1usize << level) <= size {
-        let start = 1usize << level;
-        let mut node = start;
-        while node < start * 2 {
-            if tree[node >> 1] {
+    let size = count.next_power_of_two();
+    // `out` holds the set nodes of the current level, in ascending order.
+    let mut level: Vec<u32> = Vec::new();
+    let mut stack_a = [0u32; 256];
+    let mut stack_b = [0u32; 256];
+    let (mut cur, mut next): (&mut [u32], &mut [u32]) = if size <= 256 {
+        (&mut stack_a[..], &mut stack_b[..])
+    } else {
+        level.resize(size * 2, 0);
+        level.split_at_mut(size)
+    };
+    cur[0] = 1;
+    let mut n = 1usize;
+    let mut width = 1usize;
+    while width < size {
+        let mut m = 0usize;
+        for &node in &cur[..n] {
+            let left = node * 2;
+            if b.bit() {
                 if b.bit() {
-                    if b.bit() {
-                        tree[node] = true;
-                    }
-                    tree[node + 1] = true;
-                } else {
-                    tree[node] = true;
+                    next[m] = left;
+                    m += 1;
                 }
+                next[m] = left + 1;
+            } else {
+                next[m] = left;
             }
-            node += 2;
+            m += 1;
         }
-        level += 1;
+        std::mem::swap(&mut cur, &mut next);
+        n = m;
+        width *= 2;
     }
-    // A mask that marks fields past `count` means the stream is misaligned.
-    let valid = !tree[size + count..size * 2].iter().any(|x| *x);
-    out.copy_from_slice(&tree[size..size + count]);
+    let mut valid = true;
+    for &leaf in &cur[..n] {
+        let idx = leaf as usize - size;
+        if idx < count {
+            out.push(idx as u16);
+        } else {
+            valid = false;
+        }
+    }
+    valid
+}
+
+/// `read_mask_set` as one flag per entry.
+pub fn read_mask(b: &mut BitReader, count: usize, out: &mut Vec<bool>) -> bool {
+    let mut set = Vec::new();
+    let valid = read_mask_set(b, count, &mut set);
+    out.clear();
+    out.resize(count, false);
+    for i in set {
+        out[i as usize] = true;
+    }
     valid
 }
 
@@ -219,5 +253,75 @@ pub fn zero_value(f: &FieldDesc) -> Value {
         5 => Value::Vec3f([0.0; 3]),
         14 => Value::Pos3([0; 3]),
         _ => Value::Int(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The original level-by-level reference implementation.
+    fn reference(b: &mut BitReader, count: usize) -> (Vec<bool>, bool) {
+        let mut out = vec![false; count];
+        if count <= 8 {
+            for o in out.iter_mut() {
+                *o = b.bit();
+            }
+            return (out, true);
+        }
+        if !b.bit() {
+            return (out, true);
+        }
+        let size = count.next_power_of_two();
+        let mut tree = vec![false; size * 2];
+        tree[1] = true;
+        let mut level = 1usize;
+        while (1usize << level) <= size {
+            let start = 1usize << level;
+            let mut node = start;
+            while node < start * 2 {
+                if tree[node >> 1] {
+                    if b.bit() {
+                        if b.bit() {
+                            tree[node] = true;
+                        }
+                        tree[node + 1] = true;
+                    } else {
+                        tree[node] = true;
+                    }
+                }
+                node += 2;
+            }
+            level += 1;
+        }
+        let valid = !tree[size + count..size * 2].iter().any(|x| *x);
+        out.copy_from_slice(&tree[size..size + count]);
+        (out, valid)
+    }
+
+    #[test]
+    fn mask_matches_reference() {
+        // deterministic pseudo-random bit streams
+        let mut x = 0x9e3779b97f4a7c15u64;
+        let mut data = vec![0u8; 4096];
+        for count in [1usize, 8, 9, 16, 17, 33, 63, 64, 147, 255, 300, 1000] {
+            for round in 0..200 {
+                for d in data.iter_mut() {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    // sparse streams exercise deep trees, dense ones wide trees
+                    *d = if round % 2 == 0 { (x & x >> 8 & x >> 16) as u8 } else { x as u8 };
+                }
+                let (mut a, mut b) = (BitReader::new(&data), BitReader::new(&data));
+                let (want, want_valid) = reference(&mut a, count);
+                let mut got = Vec::new();
+                let got_valid = read_mask(&mut b, count, &mut got);
+                assert_eq!((got_valid, a.pos()), (want_valid, b.pos()), "count {count}");
+                if want_valid {
+                    assert_eq!(got, want, "count {count}");
+                }
+            }
+        }
     }
 }

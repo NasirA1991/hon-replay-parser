@@ -195,19 +195,62 @@ frame that contains an event.
 
 ## 6. Packets
 
-The packet queues hold the reliable messages each client received that frame
-(`receiver` = 0-based client index as in `replayinfo`, `0xFFFFFFFF` = broadcast). Several messages can be
-concatenated. Known message ids:
+The two packet queues hold the messages each client received that frame (`receiver` =
+0-based client index as in `replayinfo`, `0xFFFFFFFF` = broadcast). Queue 0 carries game
+data, queue 1 reliable messages. A packet is a concatenation of messages separated by a
+`0x5f` byte. Message lengths are only known for the ids below, so the decoder looks for
+a known id at the packet start or after a separator and validates it (length, following
+separator, timestamp) instead of walking the packet.
 
-| first byte | message |
-|-----------:|---------|
-| `0x02` | all chat: `02 <sender> <utf-8 text> 00`, sender = 1-based client number (`Player.m_iClientNumber`) |
-| `0x03` | team chat |
-| `0x0D` | localized server notice (e.g. `rejected_invalid_ward_location`) |
-| others | UI, sound, popups; preserved raw (`Frame::packets`) |
+| queue | first byte | message |
+|------:|-----------:|---------|
+| 0 | `0x02` | all chat: `02 <sender> <utf-8 text> 00`, sender = 1-based client number (`Player.m_iClientNumber`) |
+| 0 | `0x03` | team chat |
+| 0 | `0x0D` | localized server notice (e.g. `rejected_invalid_ward_location`) |
+| 0 | `0x18` | per-client state, sent almost every frame; not decoded (it is not an input log: it changes about 20 times a minute) |
+| 0 | `0x66` | tower destroyed: `<u32> <u32 team> <u16> <u16 entity> <u16>`; coincides with the tower reaching 0 health, other fields unverified |
+| 0 | `0xA7` | barracks destroyed: `<u32 team> <u32 entity> <u32>`; other fields unverified |
+| 0 | `0xFF 0x29` / `0xFF 0x28` | statistics document chunks (6.2) |
+| 1 | `0x3E` / `0x3F` | combat popups (6.1) |
+| | others | UI, sound, popups; preserved raw (`Frame::packets`) |
 
 Chat is sent to every recipient, so the analysis layer de-duplicates by
 (time, sender, text).
+
+### 6.1 Combat popups
+
+```
+3e  kind:u8  player:u8  entity:u16  time:u32  aux:u32             flag:u8     (14 bytes)
+3f  kind:u8  player:u8  entity:u16  time:u32  aux:u32  value:f32  flag:u8     (18 bytes)
+```
+
+`player` is a 0-based client index (`0xFF` = none), `entity` the unit the number floats
+over, `time` the server clock of the event (the frame's clock or one tick earlier).
+
+| kind | meaning | receivers |
+|-----:|---------|-----------|
+| `0x10` | physical damage dealt by `player` to `entity`, after mitigation | only `player` |
+| `0x11` | magic damage dealt by `player` to `entity`, after mitigation | only `player` |
+| `0x12` | the same hit before mitigation | only `player` |
+| `0x2B`, `0x2E`, `0x30`, `0x33`, `0x38` | status applied to a hero; `aux` = duration in ms | only `player` |
+| `0x02`, `0x03`, others | attack and effect notifications of units in view (towers, creeps) | every client that sees them |
+
+The physical/magic reading of `0x10`/`0x11` is inferred: the amount lands in the
+victim's matching `*_DAMAGE_RECEIVED` counter in about 95% of unambiguous hits. Damage
+over time has no popup.
+
+### 6.2 Statistics document
+
+The server sends its match statistics as zlib-compressed JSON, once when recording
+starts (zeroed, introduced by message `0x8B`) and once at game over (final values,
+introduced by `0x0C`), to every client and as a broadcast:
+
+```
+ff 29  len:u32  bytes                      chunk (repeated)
+ff 28  len:u32  uncompressed_len:u32  bytes  last chunk
+```
+
+Concatenate the chunk bytes per receiver and inflate.
 
 ## 7. Time
 
