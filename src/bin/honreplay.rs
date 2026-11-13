@@ -81,6 +81,10 @@ enum Cmd {
         #[arg(long)]
         player: Option<u32>,
     },
+    /// Who damaged whom: hero damage per attacker and victim, with how it was attributed
+    Damage(Common),
+    /// The server's own end-of-match statistics document embedded in the replay (JSON)
+    Stats(Common),
     /// Hero kills with killer, assisters and position
     Kills(Common),
     /// Ward placements with position, owner and lifetime
@@ -469,6 +473,60 @@ fn run(cli: Cli) -> R {
                     k.y
                 )?;
             }
+        }
+        Cmd::Damage(c) => {
+            let r = report(&c.replay, 60, 0)?;
+            if c.json {
+                serde_json::to_writer_pretty(&mut w, &r.damage)?;
+                writeln!(w)?;
+                return Ok(());
+            }
+            writeln!(
+                w,
+                "{:<18} {:<18} {:>8} {:>8} {:>8} {:>9} {:>5}",
+                "attacker", "victim", "exact", "matched", "alloc", "total", "hits"
+            )?;
+            for c in &r.damage.matrix {
+                writeln!(
+                    w,
+                    "{:<18} {:<18} {:>8.0} {:>8.0} {:>8.0} {:>9.0} {:>5}",
+                    trunc(&pname(&r, c.attacker), 18),
+                    trunc(&pname(&r, c.victim), 18),
+                    c.exact,
+                    c.matched,
+                    c.allocated,
+                    c.total,
+                    c.hits
+                )?;
+            }
+            writeln!(w)?;
+            writeln!(
+                w,
+                "{:<18} {:>9} {:>10} {:>8} {:>9} {:>9} {:>9} {:>9}",
+                "player", "hero dmg", "attributed", "unattr", "illusions", "creeps", "neutrals", "buildings"
+            )?;
+            for p in &r.damage.players {
+                writeln!(
+                    w,
+                    "{:<18} {:>9.0} {:>10.0} {:>8.0} {:>9.0} {:>9.0} {:>9.0} {:>9.0}",
+                    trunc(&pname(&r, p.client), 18),
+                    p.hero_damage,
+                    p.attributed,
+                    p.unattributed,
+                    p.to_illusions,
+                    p.to_creeps,
+                    p.to_neutrals,
+                    p.to_buildings
+                )?;
+            }
+        }
+        Cmd::Stats(c) => {
+            let r = report(&c.replay, 60, 0)?;
+            match &r.server_stats {
+                Some(doc) => serde_json::to_writer_pretty(&mut w, doc)?,
+                None => write!(w, "null")?,
+            }
+            writeln!(w)?;
         }
         Cmd::Wards(c) => {
             let r = report(&c.replay, 60, 0)?;

@@ -18,6 +18,7 @@ pub mod entity;
 pub mod error;
 pub mod events;
 pub mod header;
+pub mod messages;
 pub mod replay;
 pub mod replayinfo;
 pub mod schema;

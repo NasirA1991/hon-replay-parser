@@ -72,6 +72,12 @@ Times are game time in milliseconds (0 = horn; negative = pre-game).
 | `couriers` | courier deaths | exact |
 | `advantage` | Legion minus Hellbourne earned gold and XP over time | derived |
 | `chat` | all and team chat with sender | exact |
+| `damage.hits` | every damage popup of a player against an enemy hero or illusion: time, attacker, victim, amount, physical/magic | exact (per-hit server messages) |
+| `damage.matrix` | hero damage per attacker and victim, split into `exact`, `matched` and `allocated` | exact + derived (see below) |
+| `damage.players` | per player: hero damage counter, attributed and unattributed share, popup damage to illusions, creeps, neutrals and buildings | exact |
+| `draft.picks` | the hero each player selected (`Player.m_unSelectedHeroID`) | exact |
+| `draft.bans` | `TeamInfo.m_vHiddenHeroBans*` when set | exact; empty in every replay seen so far |
+| `server_stats` | the server's end-of-match statistics JSON, verbatim | exact (embedded document) |
 | `teams` | kills, deaths, tower kills, towers remaining, gold, XP | exact and summed |
 
 ### How derived values are computed
@@ -84,7 +90,25 @@ Times are game time in milliseconds (0 = horn; negative = pre-game).
   second from 1:00 to 10:00 (excluding the fountain area) are assigned to the closest
   lane, or `jungle` when far from all three. The lane with the most samples wins; under
   40% means `roaming`. On Mid Wars every hero is `mid`.
-* **Level.** `HoN` does not network hero level, so it is computed from experience.
+* **Level.** Computed from experience. `Hero.m_uiLevel` exists in the schema but stays 0
+  for every hero, so it cannot be used. The computed level equals `HeroLevel` in the
+  embedded server statistics for all ten players of the verified match.
+* **Who damaged whom.** Three sources are combined, most reliable first:
+  1. *Exact.* The server sends each player a popup message for every hit it deals
+     (`0x3f`, kinds `0x10` physical and `0x11` magic: target entity and damage after
+     mitigation). The replay records all ten client queues, so every such hit is there
+     once. In the verified match this covers 79% of all hero damage, and a single popup
+     equals the attacker's `HERO_DAMAGE` increase of that frame to the decimal.
+  2. *Matched.* Damage over time and aura ticks have no popup. They show up as an
+     increase of the attacker's `HERO_DAMAGE` counter. When only one enemy hero received
+     damage in that frame, the pairing is unambiguous (12.5%).
+  3. *Allocated.* When several enemy heroes received damage in that frame, the rest is
+     split in proportion to what each of them received (8.7%). This is an estimate.
+
+  Each matrix row adds up to the player's `HERO_DAMAGE` counter. It can exceed it by a
+  small amount (under 2% for one player in the verified match) when a popup reports a
+  hit the counter did not include. Damage to illusions is listed separately because the
+  server does not count it as hero damage.
 
 ## Verification against official statistics
 
@@ -97,16 +121,34 @@ sight wards placed, revelation wards placed (from ward lifecycles), team kill to
 (62-58), duration, winner, and the bombardier skill build (24 points, order and level
 of every pick).
 
-GPM and XPM match after rounding. Known discrepancy: for one player (No1end, Swiftblade)
-the replay's hero experience reaches the level-25 cap at about 55:00. The official site shows
-level 23 and XPM 467. The other nine players' levels and XPM agree. This is not resolved yet.
+GPM and XPM match after rounding. For one player (No1end, Swiftblade) ward-up.com shows
+level 23 and XPM 467 while the replay gives level 25 and XPM 521. The replay is right:
+the server statistics embedded in the same replay say `HeroLevel` 25 and `HeroExp` 32400,
+and HoNBuff shows level 25 as well.
+
+### Embedded server statistics
+
+At game over the server broadcasts its statistics as zlib-compressed JSON (see
+FORMAT.md, section 6). `report.server_stats` holds it verbatim: per player `HeroLevel`,
+`HeroKills`, `HeroDeaths`, `HeroAssists`, `Networth`, `Gpm`, `Xpm`, `HeroDamage`,
+`BuildingDamage`, `CreepsKilled`, `Denies`, `Role`, `Items`, ward and consumable counts.
+`tests/replays.rs` checks it against the entity stream. Two definitions differ from the
+values above and from what stats sites show:
+
+* `Gpm` excludes the 600 starting gold; this crate and the sites use net worth per minute.
+* `HeroDamage` is 2-12% higher than `PLAYER_STAT_HERO_DAMAGE` (a different server
+  counter; what it adds is not known). Sites show `PLAYER_STAT_HERO_DAMAGE`.
 
 ## Not available from replays
 
-* **Picks and bans.** Recording starts after hero selection. The `TeamInfo` ban and pick
-  fields are exported raw when present.
-* **Per-hit damage logs (who damaged whom).** The server sends damage *totals* per player
-  and health per unit, not individual hits. The raw packet queues contain per-client
-  combat popups that may allow reconstructing this. They are preserved in
-  `Frame::packets` and documented as future work.
-* **APM.** Player orders are not part of the recorded stream.
+* **Bans.** Recording starts one tick after the pre-game phase begins, after hero
+  selection. The `TeamInfo` ban fields (`m_vHiddenHeroBans0-19`, `m_uiBanCount`) are at
+  their defaults in every replay checked, including a ranked 10-player match, and the
+  embedded server statistics have no ban field. `draft.bans` is filled if a replay ever
+  carries them.
+* **APM.** The server counts actions in `GameStats.m_uiActionCount`. The type is declared
+  in the schema and `Player.m_uiStatsIndex` points at such an entity, but that entity is
+  never sent, so the count is not in the replay. `PlayerView` (cursor, camera) and
+  `Order` are declared and never sent either, and the per-frame command section is empty.
+  Casts, item uses, purchases and skill-ups are available and could be counted, but that
+  number is not APM.

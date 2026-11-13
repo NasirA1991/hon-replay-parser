@@ -185,3 +185,68 @@ fn v7_caldavar_matches_official_stats() {
     assert_eq!(rep.objectives.iter().filter(|o| o.name == "kongor").count(), 5);
     assert_eq!(rep.objectives.iter().filter(|o| o.name == "boss_phoenix").count(), 4);
 }
+
+/// Who-damaged-whom on the 62-minute match: every row adds up to the server's hero damage
+/// counter, most of it comes from exact per-hit popups, and every kill is backed by damage.
+#[test]
+fn v7_caldavar_damage_matrix() {
+    let Some(p) = fixture("13436416.honreplay") else { return };
+    let r = Replay::open(p).unwrap();
+    let rep = analysis::analyze(&r, analysis::Options { include_positions: false, ..Default::default() }).unwrap();
+    let d = &rep.damage;
+    assert_eq!(d.matrix.len(), 50); // 5 x 5 in both directions
+    let (mut exact, mut total) = (0.0, 0.0);
+    for src in &d.players {
+        let row: f64 = d.matrix.iter().filter(|c| c.attacker == src.client).map(|c| c.total).sum();
+        assert!((row - src.attributed).abs() < 1e-6);
+        // popups can exceed the counter slightly (hits the server did not count)
+        let diff = src.attributed + src.unattributed - src.hero_damage;
+        assert!(diff > -1.0 && diff < src.hero_damage * 0.02, "client {} off by {diff}", src.client);
+        assert!(src.unattributed < src.hero_damage * 0.01);
+        total += row;
+    }
+    for c in &d.matrix {
+        exact += c.exact;
+        let (a, v) = (&rep.players[c.attacker as usize - 1], &rep.players[c.victim as usize - 1]);
+        assert_ne!(a.team, v.team);
+    }
+    assert!(exact / total > 0.75, "exact share {}", exact / total);
+    for k in &rep.kills {
+        if let Some(killer) = k.killer {
+            let cell = d.matrix.iter().find(|c| c.attacker == killer && c.victim == k.victim);
+            assert!(cell.is_some_and(|c| c.total > 0.0), "kill without damage at {}", k.t);
+        }
+    }
+    // damage taken from heroes never exceeds everything the victim received
+    for p in &rep.players {
+        let taken: f64 = d.matrix.iter().filter(|c| c.victim == p.client).map(|c| c.total).sum();
+        let t = &p.totals;
+        assert!(taken <= t.damage_received_magic + t.damage_received_physical + t.damage_received_pure + 1.0);
+    }
+}
+
+/// The replay carries the server's own end-of-match statistics; they agree with the
+/// entity stream, including the level the official site once showed differently.
+#[test]
+fn v7_caldavar_embedded_server_stats() {
+    let Some(p) = fixture("13436416.honreplay") else { return };
+    let r = Replay::open(p).unwrap();
+    let rep = analysis::analyze(&r, analysis::Options { include_positions: false, ..Default::default() }).unwrap();
+    let doc = rep.server_stats.as_ref().expect("stats document");
+    assert_eq!(doc["MatchId"], 13_436_416);
+    assert_eq!(doc["TimePlayed"], 3729);
+    assert_eq!(doc["WinnerTeam"], 2);
+    for p in &rep.players {
+        let s = &doc["Players"][&p.name];
+        assert_eq!(s["HeroKills"], p.totals.kills, "{}", p.name);
+        assert_eq!(s["HeroDeaths"], p.totals.deaths);
+        assert_eq!(s["HeroAssists"], p.totals.assists);
+        assert_eq!(s["HeroLevel"], p.totals.level, "{}", p.name);
+        assert_eq!(s["Networth"].as_f64().unwrap().floor() as i64, p.totals.net_worth);
+        assert!((s["HeroExp"].as_f64().unwrap() - p.totals.experience as f64).abs() < 1.0);
+    }
+    assert_eq!(doc["Players"]["No1end"]["HeroLevel"], 25);
+    assert_eq!(rep.draft.picks.len(), 10);
+    assert_eq!(rep.draft.picks[0].hero, "swiftblade");
+    assert!(rep.draft.bans.is_empty());
+}

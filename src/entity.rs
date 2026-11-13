@@ -12,7 +12,7 @@
 //! * variant (dynamic types only): S2R2 v7 writes `1 bit present [+5 bit key]` before the
 //!   active flag; S2R2 v6 writes a fixed per-type number of bits after it.
 //! * body: compressed field mask + changed field values (see `schema`).
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use serde::Serialize;
 
@@ -57,7 +57,9 @@ pub enum Change {
 #[derive(Clone, Default)]
 pub struct Pool {
     slots: Vec<Option<Entity>>,
-    active: BTreeSet<u32>,
+    /// Bit set of entity ids with the "active" flag. Most records are implicit ("next
+    /// active entity"), so finding the next set bit is the hottest lookup of the decoder.
+    active: Vec<u64>,
     count: usize,
 }
 
@@ -79,11 +81,7 @@ impl Pool {
         if id >= self.slots.len() {
             self.slots.resize(id + 1, None);
         }
-        if e.active {
-            self.active.insert(e.id);
-        } else {
-            self.active.remove(&e.id);
-        }
+        self.mark(e.id, e.active);
         let old = self.slots[id].replace(e);
         if old.is_none() {
             self.count += 1;
@@ -92,7 +90,7 @@ impl Pool {
     }
     fn remove(&mut self, id: u32) -> Option<Entity> {
         let e = self.slots.get_mut(id as usize)?.take()?;
-        self.active.remove(&id);
+        self.mark(id, false);
         self.count -= 1;
         Some(e)
     }
@@ -100,14 +98,31 @@ impl Pool {
         if let Some(Some(e)) = self.slots.get_mut(id as usize) {
             e.active = on;
         }
+        self.mark(id, on);
+    }
+    fn mark(&mut self, id: u32, on: bool) {
+        let (word, bit) = ((id >> 6) as usize, 1u64 << (id & 63));
         if on {
-            self.active.insert(id);
-        } else {
-            self.active.remove(&id);
+            if word >= self.active.len() {
+                self.active.resize(word + 1, 0);
+            }
+            self.active[word] |= bit;
+        } else if let Some(w) = self.active.get_mut(word) {
+            *w &= !bit;
         }
     }
+    /// Smallest active entity id greater than `after`.
     pub fn next_active(&self, after: u32) -> Option<u32> {
-        self.active.range(after + 1..).next().copied()
+        let from = after.checked_add(1)?;
+        let mut word = (from >> 6) as usize;
+        let mut bits = *self.active.get(word)? & (u64::MAX << (from & 63));
+        loop {
+            if bits != 0 {
+                return Some((word as u32) << 6 | bits.trailing_zeros());
+            }
+            word += 1;
+            bits = *self.active.get(word)?;
+        }
     }
 }
 
@@ -263,7 +278,7 @@ impl Decoder {
     ) -> Result<(), DecodeFailure> {
         let mut pos = start;
         let mut id: u32 = start_id;
-        let mut mask = Vec::with_capacity(160);
+        let mut mask: Vec<u16> = Vec::with_capacity(160);
         let total = body.len() * 8;
         loop {
             if is_end(body, pos) || self.stop_at_bit.is_some_and(|s| pos >= s) {
@@ -330,17 +345,15 @@ impl Decoder {
                     };
                     let nfields = self.defaults[tdi].len();
                     let fields_desc = self.desc_fields(tdi);
-                    if !schema::read_mask(&mut b, nfields, &mut mask) {
+                    if !schema::read_mask_set(&mut b, nfields, &mut mask) {
                         return Err(DecodeFailure {
                             bit: rec_start,
                             message: "invalid field mask on create".into(),
                         });
                     }
                     let mut fields = self.defaults[tdi].clone();
-                    for (i, on) in mask.iter().enumerate() {
-                        if *on {
-                            fields[i] = schema::read_field(&mut b, &fields_desc[i]);
-                        }
+                    for &i in &mask {
+                        fields[i as usize] = schema::read_field(&mut b, &fields_desc[i as usize]);
                     }
                     if b.pos() > total {
                         return Err(DecodeFailure {
@@ -376,29 +389,19 @@ impl Decoder {
                     };
                     let tdi = e.typedesc;
                     let fields_desc = self.desc_fields(tdi);
-                    if !schema::read_mask(&mut b, fields_desc.len(), &mut mask) {
+                    if !schema::read_mask_set(&mut b, fields_desc.len(), &mut mask) {
                         return Err(DecodeFailure {
                             bit: rec_start,
                             message: "invalid field mask on update".into(),
                         });
                     }
-                    let mut changed = Vec::new();
-                    let mut vals = Vec::new();
-                    for (i, on) in mask.iter().enumerate() {
-                        if *on {
-                            vals.push((i, schema::read_field(&mut b, &fields_desc[i])));
-                            changed.push(i as u16);
-                        }
-                    }
-                    if b.pos() > total {
-                        return Err(DecodeFailure {
-                            bit: rec_start,
-                            message: "update body past frame end".into(),
-                        });
-                    }
+                    // A record that runs past the frame end is a desync and aborts the
+                    // replay, so the fields can be applied as they are read.
+                    let changed = mask.clone();
                     if let Some(Some(e)) = self.pool.slots.get_mut(id as usize) {
-                        for (i, v) in vals {
-                            match (&mut e.fields[i], v) {
+                        for &i in &mask {
+                            let i = i as usize;
+                            match (&mut e.fields[i], schema::read_field(&mut b, &fields_desc[i])) {
                                 (Value::DeltaVec(a, _), Value::DeltaVec(d, _)) => {
                                     for k in 0..3 {
                                         a[k] = a[k].wrapping_add(d[k]);
@@ -407,6 +410,12 @@ impl Decoder {
                                 (slot, v) => *slot = v,
                             }
                         }
+                    }
+                    if b.pos() > total {
+                        return Err(DecodeFailure {
+                            bit: rec_start,
+                            message: "update body past frame end".into(),
+                        });
                     }
                     if !rec.implicit {
                         self.pool.set_active(id, rec.active);

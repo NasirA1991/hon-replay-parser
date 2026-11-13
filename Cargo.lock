@@ -200,6 +200,7 @@ name = "honreplay"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "flate2",
  "quick-xml",
  "serde",
  "serde_json",

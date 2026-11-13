@@ -53,6 +53,15 @@ impl<'a> BitReader<'a> {
         if count == 0 {
             return 0;
         }
+        // Fast path: the value lies within one unaligned 64-bit load.
+        let (byte, off) = (self.pos >> 3, self.pos & 7);
+        if count + off <= 64 {
+            if let Some(chunk) = self.data.get(byte..byte + 8) {
+                let w = u64::from_le_bytes(chunk.try_into().unwrap()) >> off;
+                self.pos += count;
+                return if count == 64 { w } else { w & ((1u64 << count) - 1) };
+            }
+        }
         let mut out = 0u64;
         let mut got = 0usize;
         while got < count {
