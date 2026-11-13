@@ -15,8 +15,11 @@ cl  player              hero                 K   D   A    LH   DN    GPM    XPM 
 ...
 ```
 
-* **S2R2 v6 and v7:** HoN Reborn 0.13.2 and earlier, and 0.13.3+. Every frame of the test
-  replays decodes bit-exactly, on both Forests of Caldavar and Mid Wars.
+* **S2R2 v6 and v7.** The format version is read from each replay, so the decoder picks
+  the right rules on its own. Verified so far: v6 on a 0.13.2.0 server (Forests of Caldavar)
+  and v7 on a 0.13.3.0 server (Mid Wars); every frame of both decodes bit-exactly. Exactly
+  which game patch moved from v6 to v7 is not established yet. More sample replays are
+  welcome.
 * **Fast:** a 26-minute match (165k frames, 4.7M entity updates) decodes in about 2 s.
 * **Cross-platform:** Linux, macOS (Apple Silicon and Intel) and Windows. Pure Rust, no
   native dependencies.

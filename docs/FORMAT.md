@@ -1,7 +1,9 @@
 # The S2R2 replay format
 
 This document describes the Heroes of Newerth replay format as implemented by this
-crate. It covers S2R2 **v6** (HoN Reborn 0.13.2 and earlier) and **v7** (0.13.3+).
+crate. It covers S2R2 **v6** and **v7**, the two format versions used by HoN Reborn. The
+verified samples are v6 from server 0.13.2.0 and v7 from server 0.13.3.0. The exact patch
+where the format changed has not been pinned down.
 Everything below was verified bit-exactly against real replays: every frame of the
 test replays decodes to its last bit.
 
@@ -23,7 +25,7 @@ A `.honreplay` file is a ZIP archive with two members:
 
 ```
 char[4]  "S2R2"
-u32      format version            (6 or 7 for HoN Reborn)
+u32      format version            (6 or 7 in the verified Reborn samples)
 u8[4]    server version            (e.g. 0.13.3.0)
 2 x typedesc table                 (see 2.1)
 u32      type map count, then count x { u16 entity type, u16 base typedesc id }
